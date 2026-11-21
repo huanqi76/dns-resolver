@@ -3,9 +3,11 @@ CFLAGS = -g -Wall
 LDFLAGS = 
 LDLIBS = 
 
-main: main.o
+main: main.o dns.o
 
-main.o: main.c
+main.o: main.c dns.h
+
+dns.o: dns.c dns.h
 
 .PHONY: clean
 clean:

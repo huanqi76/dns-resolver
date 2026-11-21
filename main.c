@@ -2,10 +2,11 @@
 #include <string.h>
 #include <stdint.h>
 
+#include "dns.h"
+
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-
 
 int main(void) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -56,6 +57,22 @@ int main(void) {
     // 00 00                    
 
     printf("received %zd bytes\n", n);
+
+    uint16_t ID = read16(buf);
+    uint16_t flags = read16(buf + 2);
+    uint16_t QDCOUNT = read16(buf + 4);
+    uint16_t ANCOUNT = read16(buf + 6);
+    uint16_t NSCOUNT = read16(buf + 8); 
+    uint16_t ARCOUNT = read16(buf + 10);
+
+    char QR = (flags >> 15) & 1;
+    uint16_t opcode = (flags >> 11) & 0xF;  // right data type?
+    char AA = (flags >> 10) & 1;
+    char TC = (flags >> 9) & 1;
+    char RD = (flags >> 8) & 1;
+    char RA = (flags >> 7) & 1;
+    uint16_t RCODE = flags & 0xF;
+
 
     return 0;
 }
