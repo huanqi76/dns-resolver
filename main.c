@@ -21,6 +21,6 @@ int main(void) {
         return 1;
     }
 
-    pritnf("listening on port 5353\n");
+    printf("listening on port 5353\n");
     return 0;
 }
