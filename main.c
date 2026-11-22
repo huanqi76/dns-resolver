@@ -93,6 +93,41 @@ int main(int argc, char **argv) {
         int next = parse_name(buf, n, 12, name, sizeof(name));
         if (next < 0) {printf("bad name\n"); continue;}
         printf("name: %s, next offset: %d\n", name, next);
+
+        if (next + 4 > n) continue;
+        uint16_t qtype = read16(buf + next);
+        uint16_t qclass = read16(buf + next + 2);
+        printf("qtype: %d, qclass: %d\n", qtype, qclass);
+
+        uint8_t out[512];
+        size_t pos = 0;
+
+        uint16_t rflags = 0x8000      // QR = 1: this is a response
+                | (opcode << 11)      
+                | (RD << 8)           
+                | 0x0080;             // RA = 1: we offer recursion
+
+        write16(out + pos, ID);         pos += 2;
+        write16(out + pos, rflags);     pos += 2;
+        write16(out + pos, QDCOUNT);    pos += 2;
+        write16(out + pos, 1);          pos += 2;   // adding one answer count
+        write16(out + pos, NSCOUNT);    pos += 2;
+        write16(out + pos, 0);    pos += 2;
+
+        size_t qlen = (next + 4) - 12;
+        memcpy(out + pos, buf + 12, qlen);
+        pos += qlen;
+
+        write16(out + pos, 0xC00C);     pos += 2;
+        write16(out + pos, 1);          pos += 2;
+        write16(out + pos, 1);          pos += 2;
+        write32(out + pos, 60);         pos += 4;
+        write16(out + pos, 4);          pos += 2;
+        out[pos++] = 1;
+        out[pos++] = 2;
+        out[pos++] = 3;
+        out[pos++] = 4;
+        sendto(fd, out, pos, 0, (struct sockaddr *)&client, clen);
     }
 
     return 0;

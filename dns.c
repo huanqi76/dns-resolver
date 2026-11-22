@@ -7,6 +7,19 @@ uint16_t read16(const uint8_t *p) {
     return (p[0] << 8) | p[1];
 }
 
+void write16(uint8_t *p, uint16_t v) {
+    p[0] = v >> 8;
+    p[1] = v & 0xFF;
+}
+
+
+void write32(uint8_t*p, uint32_t v) {
+    p[0] = (v >> 24) & 0xFF;
+    p[1] = (v >> 16) & 0xFF;
+    p[2] = v >> 8;
+    p[3] = v & 0xFF;
+}
+
 int parse_name(const uint8_t *msg, size_t msglen, size_t offset, char* out, size_t outlen) {
     size_t outpos = 0;
     size_t total = 0;
