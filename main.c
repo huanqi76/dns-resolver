@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include "dns.h"
+#include "cache.h"
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -148,16 +149,21 @@ int main(int argc, char **argv) {
         // sendto(fd, out, pos, 0, (struct sockaddr *)&client, clen);
 
         uint8_t resp[4096];
-        int rn = resolve(ufd, name, qtype, qclass, resp, sizeof(resp));
-        if (rn < 0) continue;                    // later: send SERVFAIL
+        int rn = cache_get(name, qtype, qclass, resp, sizeof(resp));
+        if (rn > 0) {
+            printf("cache hit\n");
+        } else {
+            rn = resolve(ufd, name, qtype, qclass, resp, sizeof(resp));
+            if (rn < 0) continue;
+            cache_put(name, qtype, qclass, resp, rn);
+        }
 
-        // turn the upstream response into a reply for THIS client
-        write16(resp, ID);                       // client's ID
+        write16(resp, ID); 
         uint16_t rf = read16(resp + 2);
-        rf = (rf & 0x020F)                       // keep TC and RCODE
-           | 0x8000                              // QR = 1
-           | (RD << 8)                           // client's RD
-           | 0x0080;                             // RA = 1 (AA, AD, etc. cleared)
+        rf = (rf & 0x020F)
+           | 0x8000
+           | (RD << 8)
+           | 0x0080;
         write16(resp + 2, rf);
 
         sendto(fd, resp, rn, 0, (struct sockaddr *)&client, clen);

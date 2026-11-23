@@ -3,9 +3,11 @@ CFLAGS = -g -Wall -Wextra
 LDFLAGS = 
 LDLIBS = 
 
-main: main.o dns.o
+main: main.o dns.o cache.o
 
 main.o: main.c dns.h
+
+cache.o: cache.o cache.h
 
 dns.o: dns.c dns.h
 
