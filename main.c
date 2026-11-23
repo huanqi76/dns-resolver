@@ -2,19 +2,18 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "dns.h"
 
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/time.h>
 
 int main(int argc, char **argv) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        perror("socket");
-        return 1;
-    }
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);    // fd takes queries from clients
+    if (fd < 0) {perror("socket"); return 1;}
 
     printf("Socket number: %d\n", fd);
 
@@ -36,10 +35,30 @@ int main(int argc, char **argv) {
 
     printf("listening on port %d\n", port);
 
+    // upstream
+    int ufd = socket(AF_INET, SOCK_DGRAM, 0);   // ufd talks to the server forwarded to
+    if (ufd < 0) {perror("socket"); return 1;}
+
+    struct timeval tv; 
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    setsockopt(ufd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    // struct sockaddr_in upstream;
+    // memset(&upstream, 0, sizeof(upstream));
+    // upstream.sin_family = AF_INET;
+    // upstream.sin_port = htons(53);  // port 53 is where 8.8.8.8 listens
+    // inet_pton(AF_INET, "198.41.0.4", &upstream.sin_addr);
+    // inet_pton(AF_INET, "8.8.8.8", &upstream.sin_addr);  // Google's DNS server
+    // inet_pton(AF_INET, "192.0.2.1", &upstream.sin_addr);     // belongs to a block of addresses that is reserved for documentation
+
+
     // block program until packet arrives
     uint8_t buf[4096];
     struct sockaddr_in  client;
     socklen_t clen = sizeof(client);
+
+    srand(time(NULL));
     
     while (1) {
         clen = sizeof(client);
@@ -51,7 +70,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < n; i++) {
             printf("%02x ", buf[i]);
         }
-        printf("\n");
+        printf("------------------------\n");
 
         // 3b d3                    ID
         // 01 20                    flags: RD=1, AD=1
@@ -74,6 +93,8 @@ int main(int argc, char **argv) {
         uint16_t ID = read16(buf);
         uint16_t flags = read16(buf + 2);
         uint16_t QDCOUNT = read16(buf + 4);
+        if (QDCOUNT != 1) continue;     // dns message header only has a single set of status flags and response codes that cannot be mapped to multiple questions
+
         uint16_t ANCOUNT = read16(buf + 6);
         uint16_t NSCOUNT = read16(buf + 8); 
         uint16_t ARCOUNT = read16(buf + 10);
@@ -99,35 +120,48 @@ int main(int argc, char **argv) {
         uint16_t qclass = read16(buf + next + 2);
         printf("qtype: %d, qclass: %d\n", qtype, qclass);
 
-        uint8_t out[512];
-        size_t pos = 0;
+        // hardcoded response
+        // uint8_t out[512]; 
+        // size_t pos = 0;
+        // uint16_t rflags = 0x8000      // QR = 1: this is a response
+        //         | (opcode << 11)      
+        //         | (RD << 8)           
+        //         | 0x0080;             // RA = 1: we offer recursion
+        // write16(out + pos, ID);         pos += 2;
+        // write16(out + pos, rflags);     pos += 2;
+        // write16(out + pos, QDCOUNT);    pos += 2;
+        // write16(out + pos, 1);          pos += 2;   // adding one answer count
+        // write16(out + pos, NSCOUNT);    pos += 2;
+        // write16(out + pos, 0);    pos += 2;
+        // size_t qlen = (next + 4) - 12;
+        // memcpy(out + pos, buf + 12, qlen);
+        // pos += qlen;
+        // write16(out + pos, 0xC00C);     pos += 2;
+        // write16(out + pos, 1);          pos += 2;
+        // write16(out + pos, 1);          pos += 2;
+        // write32(out + pos, 60);         pos += 4;
+        // write16(out + pos, 4);          pos += 2;
+        // out[pos++] = 1;
+        // out[pos++] = 2;
+        // out[pos++] = 3;
+        // out[pos++] = 4;
+        // sendto(fd, out, pos, 0, (struct sockaddr *)&client, clen);
 
-        uint16_t rflags = 0x8000      // QR = 1: this is a response
-                | (opcode << 11)      
-                | (RD << 8)           
-                | 0x0080;             // RA = 1: we offer recursion
+        uint8_t resp[4096];
+        int rn = resolve(ufd, name, qtype, qclass, resp, sizeof(resp));
+        if (rn < 0) continue;                    // later: send SERVFAIL
 
-        write16(out + pos, ID);         pos += 2;
-        write16(out + pos, rflags);     pos += 2;
-        write16(out + pos, QDCOUNT);    pos += 2;
-        write16(out + pos, 1);          pos += 2;   // adding one answer count
-        write16(out + pos, NSCOUNT);    pos += 2;
-        write16(out + pos, 0);    pos += 2;
+        // turn the upstream response into a reply for THIS client
+        write16(resp, ID);                       // client's ID
+        uint16_t rf = read16(resp + 2);
+        rf = (rf & 0x020F)                       // keep TC and RCODE
+           | 0x8000                              // QR = 1
+           | (RD << 8)                           // client's RD
+           | 0x0080;                             // RA = 1 (AA, AD, etc. cleared)
+        write16(resp + 2, rf);
 
-        size_t qlen = (next + 4) - 12;
-        memcpy(out + pos, buf + 12, qlen);
-        pos += qlen;
-
-        write16(out + pos, 0xC00C);     pos += 2;
-        write16(out + pos, 1);          pos += 2;
-        write16(out + pos, 1);          pos += 2;
-        write32(out + pos, 60);         pos += 4;
-        write16(out + pos, 4);          pos += 2;
-        out[pos++] = 1;
-        out[pos++] = 2;
-        out[pos++] = 3;
-        out[pos++] = 4;
-        sendto(fd, out, pos, 0, (struct sockaddr *)&client, clen);
+        sendto(fd, resp, rn, 0, (struct sockaddr *)&client, clen);
+        
     }
 
     return 0;
