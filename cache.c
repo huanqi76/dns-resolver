@@ -8,38 +8,15 @@
 
 #define CACHE_SLOTS 1024
 
-typedef struct {
-    int used;
-    char name[256];
-    uint16_t qtype, qclass;
-    time_t stored;      // when we saved it
-    uint32_t ttl;       // smallest answer TTL at that time
-    uint8_t *msg;       // copy of the full response
-    size_t len;
-} entry_t;
-
 static entry_t cache[CACHE_SLOTS];
 
 static unsigned slot_for(const char *name, uint16_t qtype, uint16_t qclass) {
     unsigned h = 5381;
     for (const char *p = name; *p; p++)
-        h = h * 33 + (unsigned char)tolower((unsigned char)*p);   // names are case-insensitive
+        h = h * 33 + (unsigned char)tolower((unsigned char)*p);
     h = h * 33 + qtype;
     h = h * 33 + qclass;
     return h % CACHE_SLOTS;
-}
-
-// Offset of the first record, just past the question section; -1 if invalid.
-static int records_start(const uint8_t *msg, size_t len) {
-    char tmp[256];
-    size_t off = 12;
-    int qd = read16(msg + 4);
-    for (int i = 0; i < qd; i++) {
-        int r = parse_name(msg, len, off, tmp, sizeof tmp);
-        if (r < 0 || (size_t)r + 4 > len) return -1;
-        off = r + 4;
-    }
-    return (int)off;
 }
 
 // Smallest TTL among the answer records; -1 if the message doesn't parse.
@@ -106,7 +83,7 @@ int cache_get(const char *name, uint16_t qtype, uint16_t qclass,
 
     time_t elapsed = time(NULL) - e->stored;
     if (elapsed < 0) elapsed = 0;
-    if (elapsed >= (time_t)e->ttl) {               // expired: delete it
+    if (elapsed >= (time_t)e->ttl) { 
         free(e->msg);
         e->msg = NULL;
         e->used = 0;

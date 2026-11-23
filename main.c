@@ -12,15 +12,19 @@
 #include <netinet/in.h>
 #include <sys/time.h>
 
+#define EDNS_SIZE 4096 
+#define QUERY_BUDGET_MS 4000
+
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     int fd = socket(AF_INET, SOCK_DGRAM, 0);    // fd takes queries from clients
     if (fd < 0) {perror("socket"); return 1;}
 
     printf("Socket number: %d\n", fd);
 
-    struct sockaddr_in addr; // defined in netinet/in.h
-    memset(&addr, 0, sizeof(addr)); // zero out address. different from {0} initializer
-                                    // can be used anywhere, not only on stack
+    struct sockaddr_in addr; 
+    memset(&addr, 0, sizeof(addr));
 
     int port = 53;
     if (argc > 1) port = atoi(argv[1]); 
@@ -41,7 +45,7 @@ int main(int argc, char **argv) {
     if (ufd < 0) {perror("socket"); return 1;}
 
     struct timeval tv; 
-    tv.tv_sec = 2;
+    tv.tv_sec = 1;
     tv.tv_usec = 0;
     setsockopt(ufd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
@@ -52,7 +56,6 @@ int main(int argc, char **argv) {
     // inet_pton(AF_INET, "198.41.0.4", &upstream.sin_addr);
     // inet_pton(AF_INET, "8.8.8.8", &upstream.sin_addr);  // Google's DNS server
     // inet_pton(AF_INET, "192.0.2.1", &upstream.sin_addr);     // belongs to a block of addresses that is reserved for documentation
-
 
     // block program until packet arrives
     uint8_t buf[4096];
@@ -93,22 +96,11 @@ int main(int argc, char **argv) {
 
         uint16_t ID = read16(buf);
         uint16_t flags = read16(buf + 2);
-        uint16_t QDCOUNT = read16(buf + 4);
-        if (QDCOUNT != 1) continue;     // dns message header only has a single set of status flags and response codes that cannot be mapped to multiple questions
-
-        uint16_t ANCOUNT = read16(buf + 6);
-        uint16_t NSCOUNT = read16(buf + 8); 
-        uint16_t ARCOUNT = read16(buf + 10);
-
-        uint8_t QR = (flags >> 15) & 1;
-        if (QR != 0) continue;
-
-        uint16_t opcode = (flags >> 11) & 0xF; 
-        uint8_t AA = (flags >> 10) & 1;
-        uint8_t TC = (flags >> 9) & 1;
+        if ((flags >> 15) & 1) continue;                         // QR must be 0 (a query)
+        if (((flags >> 11) & 0xF) != 0) continue;                // opcode must be QUERY
         uint8_t RD = (flags >> 8) & 1;
-        uint8_t RA = (flags >> 7) & 1;
-        uint16_t RCODE = flags & 0xF;
+        if (read16(buf + 4) != 1) continue;                      // exactly one question
+        if (read16(buf + 6) != 0 || read16(buf + 8) != 0) continue;   // no answer/authority records in a query
 
         // parse name
         char name[256];
@@ -148,13 +140,41 @@ int main(int argc, char **argv) {
         // out[pos++] = 4;
         // sendto(fd, out, pos, 0, (struct sockaddr *)&client, clen);
 
+        size_t qend = (size_t)next + 4;                          // end of the question section
+        const uint8_t *question = buf + 12;
+        size_t qlen = qend - 12;
+
+        // edns
+        int has_opt, edns_version;
+        uint16_t udp_size;
+        if (parse_query_edns(buf, n, qend, &has_opt, &udp_size, &edns_version) < 0) {
+            printf("bad additional section\n");
+            continue;
+        }
+
+        uint8_t small[512];
+
+        if (has_opt && edns_version != 0) { 
+            int en = build_reply_header_only(small, sizeof small, ID, RD, question, qlen,
+                                             0, 0, 1, 1, EDNS_SIZE);
+            if (en > 0) sendto(fd, small, en, 0, (struct sockaddr *)&client, clen);
+            continue;
+        }
+
         uint8_t resp[4096];
         int rn = cache_get(name, qtype, qclass, resp, sizeof(resp));
         if (rn > 0) {
             printf("cache hit\n");
         } else {
-            rn = resolve(ufd, name, qtype, qclass, resp, sizeof(resp));
-            if (rn < 0) continue;
+            rn = resolve(ufd, name, qtype, qclass, resp, sizeof(resp), 0, now_ms() + QUERY_BUDGET_MS);
+            if (rn < 0) {
+                printf("resolve failed, sending SERVFAIL\n");
+                int en = build_reply_header_only(small, sizeof small, ID, RD, question, qlen,
+                                                 2, 0, has_opt, 0, EDNS_SIZE);
+                if (en > 0) sendto(fd, small, en, 0, (struct sockaddr *)&client, clen);
+                continue;
+            }
+            rn = strip_opt(resp, rn);
             cache_put(name, qtype, qclass, resp, rn);
         }
 
@@ -166,8 +186,23 @@ int main(int argc, char **argv) {
            | 0x0080;
         write16(resp + 2, rf);
 
-        sendto(fd, resp, rn, 0, (struct sockaddr *)&client, clen);
-        
+        int out_n = rn;
+        if (has_opt) {                           // answer EDNS with our own OPT record
+            int an = append_opt(resp, out_n, sizeof(resp), EDNS_SIZE);
+            if (an > 0) out_n = an;
+        }
+
+        size_t limit = has_opt ? udp_size : 512; // the biggest UDP reply this client accepts
+        if ((size_t)out_n > limit) {             // too big: send a truncated reply (TC=1)
+            printf("reply of %d bytes exceeds client limit %zu, truncating\n", out_n, limit);
+            int en = build_reply_header_only(small, sizeof small, ID, RD, question, qlen,
+                                             rf & 0xF, 1, has_opt, 0, EDNS_SIZE);
+            if (en > 0) sendto(fd, small, en, 0, (struct sockaddr *)&client, clen);
+            continue;
+        }
+        printf("reply: %d bytes, TC=%d\n", out_n, (rf >> 9) & 1);
+
+        sendto(fd, resp, out_n, 0, (struct sockaddr *)&client, clen);
     }
 
     return 0;
